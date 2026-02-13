@@ -8,41 +8,32 @@ from datetime import datetime
 import os
 
 # Configurações da página
-st.set_page_config(page_title="Certificador ISPCAALA", page_icon="🎓")
+st.set_page_config(page_title="Certificador ISPCAALA", page_icon="🎓", layout="wide")
 
-# Criar diretório logs caso não exista
+# --- SISTEMA DE LOGS ---
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
-
-# Criar nome do arquivo log baseado em data/hora
-LOG_FILE = os.path.join(
-    LOG_DIR,
-    f"{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}_envio_certificados.txt"
-)
+LOG_FILE = os.path.join(LOG_DIR, f"{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}_envio.txt")
 
 def escrever_log(mensagem):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}] {mensagem}\n")
 
-
-# --- CONTROLE DE SESSÃO (LOGIN) ---
+# --- LOGIN ---
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
 
 def validar_conexao(email, senha):
     try:
-        with smtplib.SMTP_SSL("smtp.titan.email", 465) as server:
+        with smtplib.SMTP_SSL("smtp.titan.email", 465, timeout=10) as server:
             server.login(email, senha)
             return True
     except:
         return False
 
-
 # --- INTERFACE ---
 if not st.session_state.autenticado:
     st.title("🔐 Acesso ao Sistema")
-    st.info("Insira suas credenciais do e-mail institucional (Titan/Hostinger).")
-    
     email_user = st.text_input("E-mail (@ispcaala.com)")
     senha_user = st.text_input("Senha", type="password")
     
@@ -51,22 +42,15 @@ if not st.session_state.autenticado:
             st.session_state.autenticado = True
             st.session_state.email = email_user
             st.session_state.senha = senha_user
-
-            escrever_log(f"LOGIN REALIZADO COM SUCESSO: {email_user}")
-
             st.rerun()
         else:
-            escrever_log(f"FALHA NO LOGIN: {email_user}")
-            st.error("Falha na autenticação. Verifique seu e-mail e senha.")
-
+            st.error("Falha na autenticação.")
 
 else:
-    # --- TELA DE UPLOAD E ENVIO ---
-    st.title("📤 Envio de Certificados")
-    st.sidebar.success(f"Conectado como: {st.session_state.email}")
+    st.title("📤 Envio de Certificados (Pausa Inteligente)")
+    st.sidebar.success(f"Conectado: {st.session_state.email}")
 
-    if st.sidebar.button("Sair/Trocar Conta"):
-        escrever_log(f"LOGOUT: {st.session_state.email}")
+    if st.sidebar.button("Sair"):
         st.session_state.autenticado = False
         st.rerun()
 
@@ -81,78 +65,106 @@ else:
             try:
                 df = pd.read_excel(uploaded_excel)
                 df.columns = df.columns.str.strip().str.lower()
-
-                escrever_log("========================================")
-                escrever_log(f"INÍCIO DO ENVIO EM MASSA - Total: {len(df)}")
-                escrever_log(f"Usuário logado: {st.session_state.email}")
-                escrever_log("========================================")
-
+                
+                resumo_data = []
+                total = len(df)
+                envios_no_bloco = 0 
+                
                 with zipfile.ZipFile(uploaded_zip, 'r') as z:
                     arquivos_no_zip = z.namelist()
-
                     progresso = st.progress(0)
                     status_text = st.empty()
+                    timer_text = st.empty()
 
-                    with smtplib.SMTP_SSL("smtp.titan.email", 465) as server:
-                        server.login(st.session_state.email, st.session_state.senha)
+                    def conectar_smtp():
+                        srv = smtplib.SMTP_SSL("smtp.titan.email", 465)
+                        srv.login(st.session_state.email, st.session_state.senha)
+                        return srv
 
-                        total = len(df)
+                    server = conectar_smtp()
+                    i = 0  # Usaremos um controle manual do índice para permitir re-tentativa
 
-                        for i, linha in df.iterrows():
-                            nome = linha['nome']
-                            email_dest = linha['e-mail']
-                            nome_pdf = linha['arquivo']
+                    while i < total:
+                        linha = df.iloc[i]
+                        nome = linha.get('nome', 'N/A')
+                        email_dest = linha.get('e-mail', linha.get('email', 'N/A'))
+                        nome_pdf = linha.get('arquivo', 'N/A')
 
-                            try:
-                                if nome_pdf in arquivos_no_zip:
-                                    with z.open(nome_pdf) as f:
-                                        pdf_data = f.read()
+                        # 1. Verificação Preventiva de Cota
+                        if envios_no_bloco >= 48:
+                            server.quit()
+                            for m in range(80, 0, -1):
+                                timer_text.warning(f"☕ Limite de 50 atingido. Pausando por {m} min...")
+                                time.sleep(60)
+                            timer_text.empty()
+                            server = conectar_smtp()
+                            envios_no_bloco = 0
 
-                                    msg = EmailMessage()
-                                    msg['Subject'] = f"Certificado - {nome}"
-                                    msg['From'] = st.session_state.email
-                                    msg['To'] = email_dest
-                                    msg.set_content(
-                                        f"Olá {nome},\n\nSegue em anexo o seu certificado.\n\nAtenciosamente."
-                                    )
+                        try:
+                            if nome_pdf in arquivos_no_zip:
+                                with z.open(nome_pdf) as f:
+                                    pdf_data = f.read()
 
-                                    msg.add_attachment(
-                                        pdf_data,
-                                        maintype='application',
-                                        subtype='pdf',
-                                        filename=nome_pdf
-                                    )
+                                msg = EmailMessage()
+                                msg['Subject'] = f"Certificado - {nome}"
+                                msg['From'] = st.session_state.email
+                                msg['To'] = email_dest
+                                msg.set_content(f"Olá {nome},\n\nSegue o certificado em anexo.")
+                                msg.add_attachment(pdf_data, maintype='application', subtype='pdf', filename=nome_pdf)
 
-                                    server.send_message(msg)
+                                server.send_message(msg)
+                                envios_no_bloco += 1
+                                status_text.success(f"✅ {i+1}/{total} Enviado: {nome}")
+                                resumo_data.append({"Nome": nome, "E-mail": email_dest, "Status": "Sucesso", "Info": "Enviado"})
+                                
+                                # SÓ AVANÇA PARA O PRÓXIMO SE ENVIAR COM SUCESSO
+                                i += 1 
+                            else:
+                                status_text.warning(f"⚠️ PDF ausente para {nome}")
+                                resumo_data.append({"Nome": nome, "E-mail": email_dest, "Status": "Falha", "Info": "PDF ausente no ZIP"})
+                                i += 1 # Avança pois o erro não é do servidor, mas do arquivo
+                        
+                        except Exception as e:
+                            erro_str = str(e)
+                            # 2. Verificação de Erro em Tempo Real (Se o erro aparecer antes do contador)
+                            if "Quota Exceeded" in erro_str or "550" in erro_str or "too many errors" in erro_str.lower():
+                                status_text.error(f"🚨 O servidor bloqueou o envio agora! Iniciando pausa forçada...")
+                                server.quit()
+                                for m in range(82, 0, -1): # Pausa um pouco maior por segurança
+                                    timer_text.info(f"🔄 Servidor saturado. Retentando o mesmo e-mail em {m} min...")
+                                    time.sleep(60)
+                                timer_text.empty()
+                                server = conectar_smtp()
+                                envios_no_bloco = 0
+                                # NÃO incrementamos o 'i', então ele tentará a mesma linha novamente
+                            else:
+                                status_text.error(f"❌ Erro fatal no e-mail de {nome}")
+                                resumo_data.append({"Nome": nome, "E-mail": email_dest, "Status": "Falha", "Info": erro_str})
+                                i += 1 # Avança se for erro de e-mail inválido, por exemplo
 
-                                    status_text.text(f"✅ Enviado: {email_dest}")
-                                    escrever_log(f"ENVIADO: {email_dest} | Nome: {nome} | Arquivo: {nome_pdf}")
+                        progresso.progress(i / total)
+                        time.sleep(1.5)
 
-                                else:
-                                    st.warning(f"⚠️ {nome_pdf} não encontrado no ZIP.")
-                                    escrever_log(f"ARQUIVO NÃO ENCONTRADO: {nome_pdf} | Destino: {email_dest} | Nome: {nome}")
+                    server.quit()
 
-                            except Exception as erro_envio:
-                                st.error(f"Erro ao enviar para {email_dest}: {erro_envio}")
-                                escrever_log(f"ERRO AO ENVIAR: {email_dest} | Arquivo: {nome_pdf} | Erro: {erro_envio}")
-
-                            progresso.progress((i + 1) / total)
-                            time.sleep(1)  # Delay de segurança Titan
-
-                escrever_log("========================================")
-                escrever_log("FIM DO ENVIO EM MASSA")
-                escrever_log("========================================")
-
+                # --- DASHBOARD FINAL ---
+                st.divider()
+                st.subheader("📊 Resumo da Operação")
+                resumo_df = pd.DataFrame(resumo_data)
+                
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Total", len(resumo_df))
+                m2.metric("Sucessos ✅", len(resumo_df[resumo_df['Status'] == "Sucesso"]))
+                m3.metric("Falhas ❌", len(resumo_df[resumo_df['Status'] == "Falha"]))
+                st.dataframe(resumo_df, use_container_width=True)
+                
+                output_file = "relatorio_final.xlsx"
+                resumo_df.to_excel(output_file, index=False)
+                with open(output_file, "rb") as f:
+                    st.download_button("📥 Baixar Relatório (Excel)", f, file_name=output_file)
                 st.balloons()
-                st.success("✅ Todos os e-mails foram processados!")
 
-                # Botão pra baixar log no Streamlit
-                with open(LOG_FILE, "r", encoding="utf-8") as f:
-                    st.download_button("📄 Baixar Log (.txt)", f, file_name=os.path.basename(LOG_FILE))
-
-            except Exception as e:
-                st.error(f"Ocorreu um erro: {e}")
-                escrever_log(f"ERRO GERAL: {e}")
-
+            except Exception as e_geral:
+                st.error(f"Erro crítico: {e_geral}")
         else:
-            st.warning("Selecione os dois arquivos antes de continuar.")
+            st.warning("Selecione os arquivos.")
