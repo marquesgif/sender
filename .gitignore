@@ -2,3 +2,7 @@ dados.xlsx
 .venv/
 .python-version
 *.xlsx#
+
+logs/
+
+*lock
